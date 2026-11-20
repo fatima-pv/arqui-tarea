@@ -1,0 +1,450 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage[spanish,es-tabla,es-noshorthands]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{fancyhdr}
+\usepackage{fancyvrb}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,babel}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!60!black,citecolor=blue!50!black]{hyperref}
+
+\definecolor{codebg}{gray}{0.96}
+\definecolor{codeframe}{gray}{0.75}
+
+\newcommand{\curso}{CS3051 -- Arquitectura de Computadores}
+\newcommand{\tarea}{Tarea 5 -- Simulador de RISC-V}
+\newcommand{\repo}{\url{https://github.com/fatima-pv/arqui-tarea}}
+\newcommand{\drive}{\url{https://drive.google.com/drive/folders/13kHWLjliX8DR4jwb2rw9758nSehq1hLu?usp=sharing}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\curso}
+\fancyhead[R]{\tarea}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\setlength{\headheight}{14pt}
+
+\fvset{fontsize=\small,frame=single,framesep=2mm,rulecolor=\color{codeframe}}
+\setlist{itemsep=2pt}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  {\large\bfseries UNIVERSIDAD DE INGENIERÍA Y TECNOLOGÍA\par}
+  \vspace{0.6cm}
+  {\LARGE\bfseries Arquitectura de Computadores\par}
+  \vspace{2cm}
+  \IfFileExists{utec.jpg}{\includegraphics[width=0.35\textwidth]{utec.jpg}}{%
+    \begin{tikzpicture}
+      \node[font=\fontsize{48}{48}\selectfont\bfseries] {UTEC};
+    \end{tikzpicture}}
+  \par\vspace{2cm}
+  {\Large\bfseries rvsim: simulador del ISA RISC-V de 32 bits\par}
+  \vspace{0.8cm}
+  {\large\bfseries Tarea 5 (HW\#5) -- 2026-II\par}
+  \vspace{1.2cm}
+  {\bfseries Integrante:\par}
+  \vspace{0.3cm}
+  Pacheco Vera, Fatima Isabella\par
+  \vfill
+  {\small CS3051 -- Arquitectura de Computadores\par}
+\end{titlepage}
+
+\begin{abstract}
+Este informe describe \texttt{rvsim}, un simulador del ISA base RISC-V de 32 bits
+(RV32I) escrito en C++17. El simulador carga un programa ya compilado, sea un binario
+crudo exportado de CPUlator o un archivo ELF32, en una memoria plana
+\textit{byte-addressable} de 32 bits con formato \textit{little-endian}, y lo ejecuta
+instrucción por instrucción mediante el ciclo \textit{fetch--decode--execute}. Una
+interfaz de línea de comandos permite avanzar paso a paso, inspeccionar el PC, los 32
+registros y la memoria, colocar \textit{breakpoints} y desensamblar el código. Además de
+los requisitos obligatorios, se implementaron como funcionalidades adicionales un
+desensamblador, las \textit{environment calls} de SPIM/CPUlator, la carga de archivos
+ELF y la extensión M de multiplicación y división. El simulador se validó con los tres
+programas sugeridos en el enunciado (quicksort, árbol simétrico y \texttt{riscvtest})
+y con una batería de 74 pruebas autoverificables de cada instrucción.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Enlaces de entrega}
+
+\begin{itemize}
+  \item \textbf{Repositorio Git:} \repo
+  \item \textbf{Carpeta en Google Drive} (video demostrativo y código fuente): \drive
+\end{itemize}
+
+El código del simulador se encuentra en la carpeta \texttt{riscv-sim/} del repositorio.
+
+\section{Introducción}
+
+Un simulador de un conjunto de instrucciones (ISA) reproduce en software el estado
+arquitectural de una CPU y el efecto de cada instrucción sobre ese estado. En el caso de
+RISC-V de 32 bits, dicho estado está formado por el contador de programa (PC), los 32
+registros de propósito general \texttt{x0}--\texttt{x31} (con \texttt{x0} fijo en cero)
+y la memoria.
+
+El objetivo de la tarea fue construir un simulador capaz de cargar un programa compilado
+desde un archivo, ejecutarlo paso a paso bajo el control del usuario y permitir la
+inspección del PC, los registros y la memoria en cualquier punto de la ejecución.
+
+\section{Características generales}
+
+\begin{table}[h]
+  \centering
+  \caption{Resumen del simulador.}
+  \begin{tabularx}{\textwidth}{>{\bfseries}l X}
+    \toprule
+    Lenguaje & C++17, sin dependencias externas. \\
+    Compilación & \texttt{make} (o CMake); probado con \texttt{clang++} en macOS. \\
+    ISA & RV32I completo (37 instrucciones del anexo A) y extensión M. \\
+    Formato de entrada & Binario crudo (formato \textit{Raw} de CPUlator) cargado en
+      \texttt{0x00000000}, o ELF32 de RISC-V. \\
+    Memoria & Plana, \textit{byte-addressable}, 32 bits de direcciones,
+      \textit{little-endian}. \\
+    Interfaz & Línea de comandos interactiva (REPL) y modo no interactivo
+      (\texttt{--run}). \\
+    Tamaño & Unas 1\,260 líneas de C++ en \texttt{src/}. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Requisitos obligatorios}
+
+\begin{table}[h]
+  \centering
+  \caption{Estado de los requisitos obligatorios del enunciado.}
+  \begin{tabularx}{\textwidth}{X l}
+    \toprule
+    \textbf{Requisito} & \textbf{Estado} \\
+    \midrule
+    Soporte del ISA base RISC-V de 32 bits (anexo A) & Cumplido \\
+    Memoria en formato \textit{little-endian} & Cumplido \\
+    Carga de programas compilados desde archivo, en \texttt{0x00000000} & Cumplido \\
+    Lectura de binario crudo (anexo B) & Cumplido \\
+    Ejecución paso por paso & Cumplido \\
+    Inspección de PC, registros y memoria & Cumplido \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Funcionalidades adicionales}
+
+\begin{itemize}
+  \item \textbf{Desensamblador} con nombres ABI de registros (\texttt{sp}, \texttt{a0},
+    \texttt{t1}, \ldots) y pseudo-instrucciones (\texttt{li}, \texttt{mv}, \texttt{j},
+    \texttt{ret}, \texttt{beqz}, \ldots).
+  \item \textbf{\texttt{ecall}} con las llamadas de SPIM/CPUlator: \texttt{print\_int} (1),
+    \texttt{print\_string} (4), \texttt{read\_int} (5), \texttt{read\_string} (8),
+    \texttt{exit} (10), \texttt{print\_char} (11), \texttt{read\_char} (12),
+    \texttt{exit2} (17), impresión en hexadecimal (34), binario (35) y sin signo (36), y
+    \texttt{exit} de Linux (93).
+  \item \textbf{Carga de archivos ELF32}: segmentos \texttt{PT\_LOAD}, \textit{entry point}
+    y tabla de símbolos, que permite usar etiquetas como \texttt{break partition}.
+  \item \textbf{Breakpoints}, soporte de \texttt{ebreak}, modo \textit{trace} y modo no
+    interactivo.
+  \item \textbf{Extensión M}: \texttt{mul}, \texttt{mulh}, \texttt{mulhsu}, \texttt{mulhu},
+    \texttt{div}, \texttt{divu}, \texttt{rem} y \texttt{remu}, incluidos los casos
+    especiales de división entre cero y desbordamiento que define la especificación.
+\end{itemize}
+
+\section{Diseño del simulador}
+
+\subsection{Organización del código}
+
+\begin{table}[h]
+  \centering
+  \caption{Módulos del simulador.}
+  \begin{tabularx}{\textwidth}{>{\ttfamily}l X}
+    \toprule
+    \textbf{Archivo} & \textbf{Responsabilidad} \\
+    \midrule
+    src/memory.hpp & Memoria \textit{sparse} de 32 bits con lecturas y escrituras de
+      8, 16 y 32 bits en \textit{little-endian}. \\
+    src/cpu.hpp/.cpp & Estado arquitectural (PC, \texttt{x0}--\texttt{x31}), ciclo
+      \textit{fetch--decode--execute} y \textit{environment calls}. \\
+    src/disasm.hpp/.cpp & Desensamblador y nombres de registros. \\
+    src/loader.hpp/.cpp & Carga de binarios crudos y de archivos ELF32. \\
+    src/main.cpp & Intérprete de comandos (REPL) y modo \texttt{--run}. \\
+    tests/ & Pruebas automáticas (\texttt{run\_tests.sh}, \texttt{isa\_test.s}). \\
+    examples/ & Programas de ejemplo en ensamblador y ya compilados. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      box/.style={draw, rounded corners, fill=blue!6, minimum width=3.2cm,
+                  minimum height=0.9cm, align=center, font=\small},
+      arr/.style={-{Stealth}, thick}]
+    \node[box] (file) {Archivo\\\texttt{.bin} / \texttt{.elf}};
+    \node[box, right=1.2cm of file] (loader) {Loader\\\small\texttt{loader.cpp}};
+    \node[box, right=1.2cm of loader] (mem) {Memoria\\\small\texttt{memory.hpp}};
+    \node[box, below=1.3cm of mem] (cpu) {CPU\\\small PC, \texttt{x0}--\texttt{x31}};
+    \node[box, left=1.2cm of cpu] (repl) {REPL\\\small\texttt{main.cpp}};
+    \node[box, left=1.2cm of repl] (dis) {Desensamblador\\\small\texttt{disasm.cpp}};
+    \draw[arr] (file) -- (loader);
+    \draw[arr] (loader) -- (mem);
+    \draw[arr, <->] (cpu) -- node[right, font=\footnotesize] {lee / escribe} (mem);
+    \draw[arr] (repl) -- node[above, font=\footnotesize] {\texttt{step}} (cpu);
+    \draw[arr] (repl) -- (dis);
+    \draw[arr] (repl) -- node[left, font=\footnotesize] {\texttt{load}} (loader);
+  \end{tikzpicture}
+  \caption{Relación entre los componentes del simulador.}
+\end{figure}
+
+\subsection{Ciclo de ejecución}
+
+Cada llamada a \texttt{Cpu::step()} ejecuta exactamente una instrucción:
+
+\begin{enumerate}
+  \item \textbf{Fetch:} se verifica que el PC esté alineado a 4 bytes y se lee la
+    palabra de 32 bits a la que apunta.
+  \item \textbf{Decode:} se extraen los campos \texttt{opcode}, \texttt{rd},
+    \texttt{rs1}, \texttt{rs2}, \texttt{funct3} y \texttt{funct7}, y el inmediato con
+    extensión de signo según el formato de la instrucción (I, S, B, U o J).
+  \item \textbf{Execute:} un \texttt{switch} sobre el \textit{opcode} (y luego sobre
+    \texttt{funct3}/\texttt{funct7}) aplica la operación, accede a memoria si
+    corresponde y escribe el registro destino. Las escrituras a \texttt{x0} se ignoran,
+    así que \texttt{x0} siempre vale 0.
+  \item \textbf{Actualización del PC:} el PC pasa a \texttt{pc + 4} o al destino de un
+    salto o \textit{branch}.
+\end{enumerate}
+
+El resultado de cada paso indica si la ejecución continúa, si el programa terminó, si se
+alcanzó un \textit{breakpoint} o si hubo un error. Como no hay sistema operativo, se
+considera que un programa terminó cuando salta a sí mismo (por ejemplo
+\texttt{done: beq x2, x2, done}), cuando ejecuta una \texttt{ecall} de salida o cuando
+ocurre un error.
+
+\subsection{Memoria}
+
+La memoria cubre todo el espacio de 4~GiB, pero se reserva de forma perezosa en páginas
+de 4~KiB que se crean recién al escribir en ellas (un \texttt{unordered\_map} de número
+de página a página). Leer una dirección nunca escrita devuelve 0. Así, un programa que
+no inicializa \texttt{sp}, que vale 0 como en CPUlator, puede usar la pila en
+direcciones \texttt{0xFFFFFFxx} sin reservar 4~GiB reales. Los accesos de 16 y 32 bits
+se componen byte a byte en orden \textit{little-endian}.
+
+\subsection{Manejo de errores}
+
+Las instrucciones inválidas o no soportadas, un PC desalineado y las \texttt{ecall} con
+un número desconocido se reportan explícitamente con la instrucción y el PC donde
+ocurrieron, y detienen la ejecución sin cerrar el simulador.
+
+\section{Uso}
+
+\subsection{Compilación}
+
+\begin{Verbatim}
+cd riscv-sim
+make              # genera build/rvsim
+make test         # corre las pruebas automáticas
+\end{Verbatim}
+
+\subsection{Ejecución}
+
+\begin{Verbatim}
+./build/rvsim programa.bin            # modo interactivo
+./build/rvsim programa.bin --run      # ejecuta hasta terminar e imprime registros
+./build/rvsim programa.elf --run -t   # igual, mostrando cada instrucción
+\end{Verbatim}
+
+\subsection{Comandos del modo interactivo}
+
+\begin{table}[h]
+  \centering
+  \caption{Comandos disponibles.}
+  \small
+  \begin{tabularx}{\textwidth}{>{\ttfamily}l X}
+    \toprule
+    \textbf{Comando} & \textbf{Descripción} \\
+    \midrule
+    step [n] & Ejecuta 1 o $n$ instrucciones; muestra la instrucción desensamblada y los
+      registros y la memoria que cambiaron. \\
+    run [max] & Ejecuta hasta que el programa termina, llega a un \textit{breakpoint} o
+      a \texttt{max} instrucciones. \\
+    pc & Muestra el PC. \\
+    regs [r \ldots] & Muestra los 32 registros o solo los indicados. \\
+    mem <ini> [fin] & Muestra los bytes de un rango de memoria. \\
+    memw <dir> [n] & Muestra $n$ palabras de 32 bits en hexadecimal y decimal. \\
+    disasm [dir] [n] & Desensambla $n$ instrucciones desde el PC o desde \texttt{dir}. \\
+    break / delete / breaks & Manejo de \textit{breakpoints}. \\
+    set / poke & Modifica un registro, el PC o una palabra de memoria. \\
+    trace on|off & Muestra cada instrucción durante \texttt{run}. \\
+    info & Datos del programa cargado (formato, rango, \textit{entry point}, símbolos). \\
+    reset / load & Recarga el programa o carga otro. \\
+    help / exit & Ayuda y salida. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Los valores aceptan decimal, hexadecimal (\texttt{0x\ldots}), nombres de registro y, con
+ELF, etiquetas. Una línea vacía repite el último comando.
+
+\section{Pruebas y ejemplos de ejecución}
+
+\subsection{Ejemplo 1: \texttt{riscvtest} paso a paso}
+
+El programa \texttt{riscvtest.s} prueba \texttt{add}, \texttt{sub}, \texttt{and},
+\texttt{or}, \texttt{slt}, \texttt{addi}, \texttt{lw}, \texttt{sw}, \texttt{beq} y
+\texttt{jal}. Ejecutado paso a paso, el simulador muestra cada instrucción y el cambio
+en los registros:
+
+\begin{Verbatim}
+> step 3
+  [0x00000000] 00500113  li sp, 5
+      x2  (sp  ): 0x00000000 -> 0x00000005  (5)
+  [0x00000004] 00c00193  li gp, 12
+      x3  (gp  ): 0x00000000 -> 0x0000000C  (12)
+  [0x00000008] ff718393  addi t2, gp, -9
+      x7  (t2  ): 0x00000000 -> 0x00000003  (3)
+> run
+Programa terminado: bucle infinito en 0x00000050 (fin del programa)
+tras 19 instrucciones.
+> mem 100 103
+Memoria (0x00000064-0x00000067): 19 00 00 00
+\end{Verbatim}
+
+Al terminar, la dirección 100 (\texttt{0x64}) contiene 25 (\texttt{0x19}), que es el
+resultado esperado.
+
+\subsection{Ejemplo 2: quicksort}
+
+El programa coloca el arreglo \{6, 4, 3, 2, 1, 8, 9\} en \texttt{0x1000} y lo ordena
+\textit{in-place} con quicksort recursivo:
+
+\begin{Verbatim}
+> run
+Programa terminado: bucle infinito en 0x00000054 (fin del programa)
+tras 538 instrucciones.
+> memw 0x1000 7
+0x00001000: 0x00000001  1
+0x00001004: 0x00000002  2
+0x00001008: 0x00000003  3
+0x0000100C: 0x00000004  4
+0x00001010: 0x00000006  6
+0x00001014: 0x00000008  8
+0x00001018: 0x00000009  9
+\end{Verbatim}
+
+\subsection{Ejemplo 3: árbol simétrico}
+
+El programa coloca el árbol aplanado \{6, 4, 4, 1, 2, 2, 1\} en \texttt{0x1000} y
+evalúa \texttt{is\_symmetric}. Como el árbol es simétrico, termina con
+\texttt{a0 = 1}:
+
+\begin{Verbatim}
+$ ./build/rvsim examples/symmetric_tree.bin --run
+Programa terminado: bucle infinito en 0x00000048 (fin del programa)
+tras 152 instrucciones.
+pc = 0x00000048
+...
+x2  sp   0x00000000   x10 a0   0x00000001   ...
+\end{Verbatim}
+
+\subsection{Ejemplo 4: entrada y salida con \texttt{ecall}}
+
+\texttt{fibonacci\_io} lee un número con \texttt{read\_int} e imprime la sucesión de
+Fibonacci con \texttt{print\_int} y \texttt{print\_string}:
+
+\begin{Verbatim}
+$ ./build/rvsim examples/fibonacci_io.bin --run
+Cuantos numeros de Fibonacci? 10
+Fibonacci: 0 1 1 2 3 5 8 13 21 34
+Programa terminado con ecall exit(0) tras 142 instrucciones.
+\end{Verbatim}
+
+\subsection{Ejemplo 5: archivo ELF con símbolos y breakpoints}
+
+El mismo quicksort compilado como ELF se carga en su \textit{entry point}
+(\texttt{0x10000}) y permite usar las etiquetas del programa:
+
+\begin{Verbatim}
+> break partition
+Breakpoint en 0x000100C8
+> run
+Breakpoint en 0x000100C8  addi t0, a2, -1
+> disasm
+partition:
+=>* 0x000100C8: fff60293  addi t0, a2, -1
+    0x000100CC: 00229293  slli t0, t0, 2
+    0x000100D0: 005502b3  add t0, a0, t0
+    0x000100D4: 0002a303  lw t1, 0(t0)
+\end{Verbatim}
+
+\subsection{Pruebas automáticas}
+
+\texttt{tests/isa\_test.s} contiene 74 pruebas autoverificables que cubren cada
+instrucción de RV32I y de la extensión M, incluidos casos límite como la extensión de
+signo en \texttt{lb}/\texttt{lh}, los desplazamientos aritméticos y la división entre
+cero. El programa termina con \texttt{exit(0)} solo si todas pasan.
+\texttt{make test} ejecuta esa batería junto con los ejemplos anteriores y algunos casos
+de la interfaz (carga ELF, \texttt{step}, reporte de instrucciones inválidas):
+
+\begin{Verbatim}
+$ make test
+...
+  OK    carga ELF (entry 0x10000)
+  OK    step x3 -> pc = 0x0000000C
+  OK    instrucción inválida se reporta
+
+9 pruebas OK, 0 fallidas
+\end{Verbatim}
+
+Los programas de prueba se ensamblaron con un mini-ensamblador
+(\texttt{tools/rvasm.py}) que solo sirve para generarlos y no forma parte del simulador.
+Los binarios también pueden exportarse desde CPUlator siguiendo el anexo B del
+enunciado (\textit{Memory} $\rightarrow$ \textit{Save}, formato \textit{Raw}, desde
+\texttt{0x0000}).
+
+\section{Limitaciones}
+
+\begin{itemize}
+  \item No se modelan privilegios, CSR, interrupciones ni excepciones al estilo de
+    RISC-V: los errores detienen la simulación y se reportan al usuario.
+  \item \texttt{fence} y \texttt{fence.i} se tratan como \textit{no-op}, lo cual es
+    correcto en un simulador secuencial de un solo núcleo.
+  \item No se implementó la integración con GDB.
+  \item El simulador es funcional, no de ciclos: no modela pipeline, cachés ni tiempos.
+\end{itemize}
+
+\section{Conclusiones}
+
+Se implementó un simulador funcional de RV32I que cumple todos los requisitos
+obligatorios del enunciado: mantiene el estado arquitectural de la CPU, carga binarios
+crudos en \texttt{0x00000000} sobre una memoria \textit{little-endian}, ejecuta paso a
+paso y permite inspeccionar el PC, los registros y la memoria. Los tres programas
+sugeridos producen los resultados esperados.
+
+Las funcionalidades adicionales hacen que el simulador sea útil como herramienta de
+depuración: el desensamblador y los símbolos ELF permiten seguir el programa en
+términos del código fuente, las \texttt{ecall} permiten programas interactivos y la
+extensión M amplía el conjunto de programas que se pueden ejecutar.
+
+\begin{thebibliography}{9}
+  \bibitem{hw} CS3051 -- Arquitectura de Computadores. \textit{Tarea 5: Simulador de
+    RISC-V}. Documento del curso, 2026-II.
+  \bibitem{spec} RISC-V International. \textit{The RISC-V Instruction Set Manual,
+    Volume I: Unprivileged ISA}. \url{https://riscv.org/technical/specifications/}
+  \bibitem{harris} S. Harris y D. Harris. \textit{Digital Design and Computer
+    Architecture: RISC-V Edition}. Morgan Kaufmann, 2021.
+  \bibitem{cpulator} CPUlator. \textit{Documentación de system calls}.
+    \url{https://cpulator.01xz.net/doc/#syscall}
+  \bibitem{toy} Grazen0. \textit{toy-simulator}.
+    \url{https://github.com/Grazen0/toy-simulator}
+\end{thebibliography}
+
+\end{document}
